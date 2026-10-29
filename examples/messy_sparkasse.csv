@@ -1,0 +1,6 @@
+"Kontonummer";"Buchungstag";"Valutadatum";"Buchungstext";"Verwendungszweck";"Empfänger";"Betrag";"Währung";
+DE02120300000000202051;29.10.2026;29.10.2026;Lastschrift;REWE SAGT DANKE  1234;REWE Markt GmbH;-42,13;EUR;
+DE02120300000000202051;28.10.2026;28.10.2026;Gutschrift;Gehalt Oktober;Arbeitgeber AG;2.450,75;EUR;
+DE02120300000000202051;15.10.2026;15.10.2026;Kartenzahlung;Café Müller Karte 001;Café Müller;-4,50;EUR;
+;;;Alter Kontostand;;;1.000,00;EUR;
+DE02120300000000202051;27.10.2026;27.10.2026;Überweisung;Miete November;Vermieter & Co. KG;-950,00;EUR;
