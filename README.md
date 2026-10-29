@@ -35,6 +35,7 @@ non-empty column passed through untouched.
 | German/English header soup (`Buchungstag`, `Wertstellung`, `Started Date`, …) | mapped to `date` / `payee` / `amount` / `balance` |
 | no headers at all | columns classified by parsing success ratio |
 | footers (`Alter Kontostand`), repeated headers, blank rows | dropped |
+| zip/xlsx/image bytes with any file extension | refused loudly — detection is content-based, extensions are decoration |
 
 When a date or amount can't be parsed, the row is dropped and counted in
 the stderr report — silent corruption is worse than visible loss.

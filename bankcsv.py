@@ -322,6 +322,9 @@ def load_rows(path):
     if not raw.strip():
         raise BankcsvError("file is empty")
     enc = detect_encoding(raw)
+    if enc != "utf-16" and b"\x00" in raw[:8192]:
+        raise BankcsvError("input looks like a binary file (zip, Excel, "
+                           "image?) — bankcsv converts CSV text only")
     text = raw.decode(enc)
     delim = sniff_delimiter(text)
     rows = list(csv.reader(io.StringIO(text), delimiter=delim))

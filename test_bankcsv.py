@@ -308,6 +308,28 @@ class TestCLI(unittest.TestCase):
         self.assertIn("';'", out)
         self.assertIn("Buchungstag", out)
 
+    def test_extension_blind(self):
+        path = self._path("statement.txt")
+        path.write_bytes(SPARKASSE_TEXT.encode("cp1252"))
+        code, out, _ = self.run_cli(["probe", str(path)])
+        self.assertEqual(code, 0)
+        self.assertIn("cp1252", out)
+        self.assertIn("Buchungstag", out)
+
+    def test_binary_rejected_regardless_of_extension(self):
+        path = self._path("in.csv")
+        path.write_bytes(b"PK\x03\x04" + bytes(400))
+        code, _, err = self.run_cli(["probe", str(path)])
+        self.assertEqual(code, 1)
+        self.assertIn("binary", err)
+
+    def test_utf16_csv_still_accepted(self):
+        path = self._path("in.csv")
+        path.write_bytes(REVOLUT_TEXT.encode("utf-16"))
+        code, out, _ = self.run_cli(["probe", str(path)])
+        self.assertEqual(code, 0)
+        self.assertIn("utf-16", out)
+
     def test_missing_file(self):
         path = self._path("nope.csv")
         code, _, err = self.run_cli(["clean", str(path)])
