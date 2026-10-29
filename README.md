@@ -1,5 +1,7 @@
 # bankcsv
 
+[![tests](https://github.com/p2plus/bankcsv/actions/workflows/tests.yml/badge.svg)](https://github.com/p2plus/bankcsv/actions/workflows/tests.yml)
+
 Clean garbage bank CSV exports into boring, consistent CSVs.
 
 Banks export CSVs like they hate you: cp1252, semicolons, decimal commas,
