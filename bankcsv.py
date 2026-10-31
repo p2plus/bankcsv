@@ -18,9 +18,10 @@ import os
 import re
 import sys
 import unittest
-from datetime import datetime
+import zipfile
+from datetime import date, datetime
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 CANONICAL = ("date", "payee", "amount", "balance")
 
 
@@ -313,7 +314,77 @@ def _norm_cell(c):
     return " ".join(str(c).split()).lower()
 
 
-def load_rows(path):
+def _is_xlsx(raw):
+    if not raw.startswith(b"PK\x03\x04"):
+        return False
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            return "xl/workbook.xml" in z.namelist()
+    except zipfile.BadZipFile:
+        return False
+
+
+def _cell_to_text(v):
+    """One xlsx cell → the string our parsers expect. Dates (openpyxl
+    converts date-formatted serial numbers) become ISO; integer-valued
+    floats lose the '.0'; formulas read as their cached values
+    (data_only), empty when never computed."""
+    if v is None:
+        return ""
+    if isinstance(v, datetime):
+        return v.date().isoformat()
+    if isinstance(v, date):
+        return v.isoformat()
+    if isinstance(v, float) and v.is_integer() and abs(v) < 1e15:
+        return str(int(v))
+    return str(v)
+
+
+def _pick_sheet(wb, sheet):
+    s = str(sheet)
+    if s.isdigit():
+        i = int(s)
+        if 1 <= i <= len(wb.worksheets):
+            return wb.worksheets[i - 1]
+    for ws in wb.worksheets:
+        if ws.title == s:
+            return ws
+    names = ", ".join(ws.title for ws in wb.worksheets)
+    raise BankcsvError(f"sheet {s!r} not found — available: {names}")
+
+
+def load_xlsx(raw, sheet=None):
+    """Rows from a real xlsx/xlsm workbook via the optional openpyxl
+    extra. Default sheet: the biggest one by row count (banks put the
+    transactions there); override per name or 1-based index."""
+    try:
+        import openpyxl
+    except ImportError:
+        raise BankcsvError(
+            "this file is an xlsx workbook — install the optional extra: "
+            "pip install 'bankcsv[xlsx]'")
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True,
+                                    data_only=True)
+    except Exception as e:
+        raise BankcsvError(f"could not open workbook: {e}") from e
+    try:
+        if sheet is not None:
+            ws = _pick_sheet(wb, sheet)
+        else:
+            ws = max(wb.worksheets, key=lambda w: w.max_row or 0)
+        rows = [[_cell_to_text(v) for v in row]
+                for row in ws.iter_rows(values_only=True)]
+    finally:
+        wb.close()
+    while rows and not any(c.strip() for c in rows[-1]):  # sheet padding
+        rows.pop()
+    if not any(any(c.strip() for c in r) for r in rows):
+        raise BankcsvError("workbook sheet has no data rows")
+    return rows, {"encoding": "xlsx", "delimiter": None}
+
+
+def load_rows(path, sheet=None):
     try:
         with open(path, "rb") as f:
             raw = f.read()
@@ -321,10 +392,13 @@ def load_rows(path):
         raise BankcsvError(str(e)) from e
     if not raw.strip():
         raise BankcsvError("file is empty")
+    if _is_xlsx(raw):
+        return load_xlsx(raw, sheet)
     enc = detect_encoding(raw)
     if enc != "utf-16" and b"\x00" in raw[:8192]:
-        raise BankcsvError("input looks like a binary file (zip, Excel, "
-                           "image?) — bankcsv converts CSV text only")
+        raise BankcsvError("input looks like a binary file (zip, image?) — "
+                           "bankcsv converts CSV text; xlsx workbooks need "
+                           "the optional extra (pip install 'bankcsv[xlsx]')")
     text = raw.decode(enc)
     delim = sniff_delimiter(text)
     rows = list(csv.reader(io.StringIO(text), delimiter=delim))
@@ -424,9 +498,9 @@ def clean_rows(rows, decimal=None, dayfirst=False, datefmt=None,
 # --------------------------------------------------------------- report
 
 def format_report(report):
+    delim = report["delimiter"] if report["delimiter"] is not None else "(cells)"
     lines = []
-    lines.append(f"bankcsv: encoding={report['encoding']} "
-                 f"delimiter={report['delimiter']!r}")
+    lines.append(f"bankcsv: encoding={report['encoding']} delimiter={delim!r}")
     m = "  ".join(f"{c}←{n!r}" for c, n in report["mapping"].items())
     lines.append(f"bankcsv: mapping: {m}")
     if report["extras"]:
@@ -467,6 +541,9 @@ def main(argv=None):
                         help="decimal separator override (default: sniff)")
         sp.add_argument("--delimiter", default=None, metavar="CHAR",
                         help="field delimiter override (default: sniff)")
+        sp.add_argument("--sheet", default=None, metavar="SHEET",
+                        help="xlsx sheet by name or 1-based index "
+                             "(default: the biggest sheet)")
         sp.add_argument("--datefmt", default=None, metavar="FMT",
                         help="explicit strptime format for the date column")
         sp.add_argument("--dayfirst", action="store_true",
@@ -495,11 +572,15 @@ def main(argv=None):
         return 2
 
     try:
-        rows, meta = load_rows(args.file)
+        rows, meta = load_rows(args.file, sheet=args.sheet)
     except BankcsvError as e:
         print(f"bankcsv: error: {e}", file=sys.stderr)
         return 1
     if args.delimiter:
+        if meta["encoding"] == "xlsx":
+            print("bankcsv: error: --delimiter does not apply to xlsx "
+                  "input (cells are already split)", file=sys.stderr)
+            return 1
         meta["delimiter"] = args.delimiter
         rows = list(csv.reader(io.StringIO(
             "".join(l + "\n" for l in
@@ -518,7 +599,8 @@ def main(argv=None):
         except BankcsvError as e:
             shown = f"none ({e})"
         print(f"encoding:  {meta['encoding']}")
-        print(f"delimiter: {meta['delimiter']!r}")
+        d = meta["delimiter"]
+        print(f"delimiter: {d!r}" if d is not None else "delimiter: n/a (cells)")
         print(f"rows:      {len(rows)} (incl. header, blanks)")
         print(f"mapping:   {shown}")
         return 0

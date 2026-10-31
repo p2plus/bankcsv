@@ -3,11 +3,20 @@ import contextlib
 import csv
 import io
 import os
+import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 import bankcsv as b
+
+try:
+    import openpyxl
+    HAVE_OPENPYXL = True
+except ImportError:
+    HAVE_OPENPYXL = False
 
 
 class TestEncoding(unittest.TestCase):
@@ -339,6 +348,149 @@ class TestCLI(unittest.TestCase):
     def test_no_cmd(self):
         code, _, _ = self.run_cli([])
         self.assertEqual(code, 2)
+
+
+@unittest.skipUnless(HAVE_OPENPYXL, "openpyxl not installed (bankcsv[xlsx])")
+class TestXlsx(unittest.TestCase):
+    def run_cli(self, argv):
+        err, out = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            code = b.main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def _dir(self):
+        root = Path(tempfile.mkdtemp()).resolve()
+        old = os.getcwd()
+        os.chdir(root)
+        self.addCleanup(os.chdir, old)
+        self.addCleanup(lambda p=root: __import__("shutil").rmtree(
+            p, ignore_errors=True))
+        return root
+
+    def make_xlsx(self, name, sheets):
+        root = self._dir()
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        for title, rows in sheets.items():
+            ws = wb.create_sheet(title)
+            for r in rows:
+                ws.append(r)
+        path = root / name
+        wb.save(path)
+        return path
+
+    TX_SHEETS = {
+        "Summary": [["Kontoauszug Oktober 2026"], ["Stand:"], ["1.000,00"]],
+        "Transactions": [
+            ["Buchungstag", "Verwendungszweck", "Betrag"],
+            [datetime(2026, 10, 29), "REWE SAGT DANKE", -42.13],
+            [datetime(2026, 10, 28), "Gehalt Oktober", "2.450,75"],
+            [datetime(2026, 10, 27), "Café Müller", -4.5],
+        ],
+    }
+
+    def test_clean_real_workbook(self):
+        path = self.make_xlsx("bank.xlsx", self.TX_SHEETS)
+        code, out, err = self.run_cli(["clean", str(path)])
+        self.assertEqual(code, 0)
+        rows = list(csv.reader(io.StringIO(out)))
+        self.assertEqual(rows[0][:3], ["date", "payee", "amount"])
+        self.assertEqual(len(rows), 4)  # header + 3 transactions
+        self.assertEqual(rows[1], ["2026-10-29", "REWE SAGT DANKE", "-42.13"])
+        self.assertEqual(rows[2][2], "2450.75")
+        self.assertEqual(rows[3][2], "-4.50")
+
+    def test_content_detection_ignores_extension(self):
+        path = self.make_xlsx("statement.bin", self.TX_SHEETS)
+        code, out, _ = self.run_cli(["probe", str(path)])
+        self.assertEqual(code, 0)
+        self.assertIn("xlsx", out)
+        self.assertIn("Buchungstag", out)
+
+    def test_auto_picks_biggest_sheet(self):
+        path = self.make_xlsx("bank.xlsx", self.TX_SHEETS)
+        code, out, err = self.run_cli(["clean", str(path)])
+        self.assertEqual(code, 0)
+        self.assertNotIn("Kontoauszug", out)
+
+    def test_sheet_by_name(self):
+        sheets = {"Big": [["x"]] * 10, "Data": self.TX_SHEETS["Transactions"]}
+        path = self.make_xlsx("bank.xlsx", sheets)
+        code, out, _ = self.run_cli(["clean", str(path), "--sheet", "Data"])
+        self.assertEqual(code, 0)
+        self.assertIn("REWE", out)
+
+    def test_sheet_by_index(self):
+        path = self.make_xlsx("bank.xlsx", self.TX_SHEETS)
+        code, out, _ = self.run_cli(["clean", str(path), "--sheet", "2"])
+        self.assertEqual(code, 0)
+        self.assertIn("REWE", out)
+
+    def test_invalid_sheet_lists_names(self):
+        path = self.make_xlsx("bank.xlsx", self.TX_SHEETS)
+        code, _, err = self.run_cli(["clean", str(path), "--sheet", "Nope"])
+        self.assertEqual(code, 1)
+        self.assertIn("Summary", err)
+        self.assertIn("Transactions", err)
+
+    def test_integer_valued_floats_lose_dot_zero(self):
+        sheets = {"S": [["date", "amount"],
+                        [datetime(2026, 1, 1), 1000.0]]}
+        path = self.make_xlsx("b.xlsx", sheets)
+        code, out, _ = self.run_cli(["clean", str(path)])
+        self.assertEqual(code, 0)
+        self.assertIn("1000.00", out)
+
+    def test_text_dates_and_amounts_inside_cells(self):
+        sheets = {"S": [["Buchungstag", "Betrag"],
+                        ["29.10.2026", "1.234,56"]]}
+        path = self.make_xlsx("b.xlsx", sheets)
+        code, out, _ = self.run_cli(["clean", str(path)])
+        self.assertEqual(code, 0)
+        self.assertIn("2026-10-29,,1234.56", out)  # no payee column here
+
+    def test_trailing_padding_dropped_before_junk_count(self):
+        rows = list(self.TX_SHEETS["Transactions"]) + [["", "", ""], [None] * 3]
+        path = self.make_xlsx("b.xlsx", {"S": rows})
+        code, _, err = self.run_cli(["clean", str(path)])
+        self.assertEqual(code, 0)
+        self.assertIn("3 rows in", err)  # padding not counted as data
+
+    def test_formula_cell_reads_cached_empty(self):
+        rows = [["date", "payee", "amount"],
+                [datetime(2026, 1, 2), "computed", "=SUM(B1:B1)"]]
+        path = self.make_xlsx("b.xlsx", {"S": rows})
+        code, _, err = self.run_cli(["clean", str(path)])
+        self.assertIn("no amount: 1", err)  # no cached value → empty → junk
+
+    def test_delimiter_override_rejected_for_xlsx(self):
+        path = self.make_xlsx("b.xlsx", self.TX_SHEETS)
+        code, _, err = self.run_cli(["clean", str(path), "--delimiter", ";"])
+        self.assertEqual(code, 1)
+        self.assertIn("xlsx", err)
+
+    def test_empty_sheet_error(self):
+        path = self.make_xlsx("b.xlsx", {"S": []})
+        code, _, err = self.run_cli(["clean", str(path)])
+        self.assertEqual(code, 1)
+        self.assertIn("no data rows", err)
+
+    def test_missing_extra_message(self):
+        path = self.make_xlsx("b.xlsx", self.TX_SHEETS)
+        with mock.patch.dict(sys.modules, {"openpyxl": None}):
+            with self.assertRaises(b.BankcsvError) as cm:
+                b.load_rows(str(path))
+        self.assertIn("bankcsv[xlsx]", str(cm.exception))
+
+    def test_zip_without_workbook_still_binary(self):
+        root = self._dir()
+        path = root / "not_a_book.csv"
+        import zipfile
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr("readme.txt", "hello")
+        code, _, err = self.run_cli(["probe", str(path)])
+        self.assertEqual(code, 1)
+        self.assertIn("binary", err)
 
 
 if __name__ == "__main__":

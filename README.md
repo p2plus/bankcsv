@@ -11,7 +11,8 @@ dependencies, and it never touches the network.
 
 ## Install
 
-    pipx install bankcsv
+    pipx install bankcsv            # zero dependencies, CSV only
+    pipx install bankcsv[xlsx]      # + real xlsx/xlsm workbooks (openpyxl)
 
 or just keep `bankcsv.py` next to your scripts. Python 3.10+.
 
@@ -37,7 +38,33 @@ non-empty column passed through untouched.
 | German/English header soup (`Buchungstag`, `Wertstellung`, `Started Date`, …) | mapped to `date` / `payee` / `amount` / `balance` |
 | no headers at all | columns classified by parsing success ratio |
 | footers (`Alter Kontostand`), repeated headers, blank rows | dropped |
-| zip/xlsx/image bytes with any file extension | refused loudly — detection is content-based, extensions are decoration |
+| xlsx/xlsm workbooks (with `bankcsv[xlsx]`) | rows read directly — see below |
+| zip/image bytes with any file extension | refused loudly — detection is content-based, extensions are decoration |
+
+## Excel input
+
+With the optional extra (`pipx install bankcsv[xlsx]`), bankcsv reads
+real workbooks. Detection is content-based as always — a workbook named
+`statement.dat` works, and a zip that isn't a workbook is still refused.
+What you get for the quirks:
+
+- **Sheet choice:** banks put the transactions on the biggest sheet, so
+  that's the default. Override with `--sheet NAME` or `--sheet 3`
+  (1-based); a wrong name lists what's available.
+- **Dates:** Excel stores dates as serial numbers with a format — they
+  come back as proper ISO dates. Text dates (`29.10.2026`) inside cells
+  still go through the normal date parser.
+- **Numbers:** real numeric cells (`-42.13`) and locale text in cells
+  (`"2.450,75"`) both normalize; `1000.0` prints as `1000.00`, not
+  `1000.0`.
+- **Formulas:** read as their cached values (`data_only`). A formula
+  that was never computed in Excel comes out empty — honest, not a guess.
+- **Padding:** trailing empty rows from the sheet's used range are
+  dropped before they pollute the junk count.
+
+Without the extra, pointing bankcsv at a workbook gives you one line:
+`install the optional extra: pip install 'bankcsv[xlsx]'` — never a
+stacktrace.
 
 When a date or amount can't be parsed, the row is dropped and counted in
 the stderr report — silent corruption is worse than visible loss.
@@ -58,6 +85,7 @@ the stderr report — silent corruption is worse than visible loss.
 ## Overrides
 
     --delimiter CHAR     force a delimiter
+    --sheet SHEET        xlsx sheet by name or 1-based index
     --decimal , | .      force decimal separator
     --datefmt FMT        force a strptime format for the date column
     --dayfirst           ambiguous slash dates read day-first
@@ -66,7 +94,7 @@ the stderr report — silent corruption is worse than visible loss.
 ## Self-check
 
     bankcsv --self-test                    # runs the test suite, exit 0 = green
-    python3 -m unittest test_bankcsv -v    # 61 tests
+    python3 -m unittest test_bankcsv -v    # 78 tests (14 need openpyxl)
 
 ## License
 
